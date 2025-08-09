@@ -28,6 +28,9 @@ permissions:
   pull-requests: 'write'
   issues: 'write'
 
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   gemini-cli:
     # 実行条件: 明示的に @gemini が含まれる場合のみ動作させるための複合条件
@@ -114,7 +117,7 @@ jobs:
           ${{  steps.get_context.outputs.is_pr == 'true' }}
         uses: 'actions/checkout@v4'
         with:
-          token: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          token: ${{ secrets.GITHUB_TOKEN }}
           repository: '${{ github.repository }}'
           ref: 'refs/pull/${{ steps.get_context.outputs.issue_number }}/head'
           fetch-depth: 0
@@ -125,7 +128,7 @@ jobs:
           ${{  steps.get_context.outputs.is_pr == 'false' }}
         uses: 'actions/checkout@v4'
         with:
-          token: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          token: ${{ secrets.GITHUB_TOKEN }}
           repository: '${{ github.repository }}'
           fetch-depth: 0
 
@@ -133,7 +136,7 @@ jobs:
       - name: 'Acknowledge request'
         env:
           GITHUB_ACTOR: '${{ github.actor }}'
-          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
           REPOSITORY: '${{ github.repository }}'
           REQUEST_TYPE: '${{ steps.get_context.outputs.request_type }}'
@@ -150,7 +153,7 @@ jobs:
       - name: 'Get description'
         id: 'get_description'
         env:
-          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           IS_PR: '${{ steps.get_context.outputs.is_pr }}'
           ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
         run: |-
@@ -170,7 +173,7 @@ jobs:
       - name: 'Get comments'
         id: 'get_comments'
         env:
-          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           IS_PR: '${{ steps.get_context.outputs.is_pr }}'
           ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
         run: |-
@@ -191,7 +194,7 @@ jobs:
         id: 'run_gemini'
         uses: 'google-github-actions/run-gemini-cli@v0'
         env:
-          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPOSITORY: '${{ github.repository }}'
           USER_REQUEST: '${{ steps.get_context.outputs.user_request }}'
           ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
