@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CRUD App</title>
+    <style>
+        #test-container {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+        }
+        #test-results .pass {
+            color: green;
+        }
+        #test-results .fail {
+            color: red;
+        }
+    </style>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Todoリスト</h1>
+    <form id="add-form">
+        <input type="text" id="item-input" placeholder="新しいアイテム" required>
+        <button type="submit">追加</button>
+    </form>
+    <ul id="item-list"></ul>
+
+    <div id="test-container">
+        <h2>テスト結果</h2>
+        <ul id="test-results"></ul>
+    </div>
+
+    <script src="script.js"></script>
+    <script src="test.js"></script>
+</body>
+</html>
