@@ -1,0 +1,307 @@
+name: '💬 Gemini CLI'
+
+on:
+  pull_request_review_comment:
+    types:
+      - 'created'
+  pull_request_review:
+    types:
+      - 'submitted'
+  issue_comment:
+    types:
+      - 'created'
+  issues:
+    types:
+      - 'opened'
+
+concurrency:
+  group: ${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: 'bash'
+
+permissions:
+  contents: 'write'
+  id-token: 'write'
+  pull-requests: 'write'
+  issues: 'write'
+
+jobs:
+  gemini-cli:
+    # 実行条件: 明示的に @gemini が含まれる場合のみ動作させるための複合条件
+    if: |-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'issues' && github.event.action == 'opened' &&
+        contains(github.event.issue.body, '@gemini') &&
+        !contains(github.event.issue.body, '@gemini /review') &&
+        !contains(github.event.issue.body, '@gemini /triage') &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
+      ) ||
+      (
+        (
+          github.event_name == 'issue_comment' ||
+          github.event_name == 'pull_request_review_comment'
+        ) &&
+        contains(github.event.comment.body, '@gemini') &&
+        !contains(github.event.comment.body, '@gemini /review') &&
+        !contains(github.event.comment.body, '@gemini /triage') &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      ) ||
+      (
+        github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, '@gemini') &&
+        !contains(github.event.review.body, '@gemini /review') &&
+        !contains(github.event.review.body, '@gemini /triage') &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
+      )
+    timeout-minutes: 30
+    runs-on: 'ubuntu-latest'
+
+    steps:
+      # イベントペイロードからリクエスト本文、Issue/PR 番号、PR 判定を抽出
+      - name: 'Get context from event'
+        id: 'get_context'
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          EVENT_PAYLOAD: '${{ toJSON(github.event) }}'
+        run: |-
+          set -euo pipefail
+
+          USER_REQUEST=""
+          ISSUE_NUMBER=""
+          IS_PR="false"
+
+          if [[ "${EVENT_NAME}" == "issues" ]]; then
+            USER_REQUEST=$(echo "${EVENT_PAYLOAD}" | jq -r .issue.body)
+            ISSUE_NUMBER=$(echo "${EVENT_PAYLOAD}" | jq -r .issue.number)
+          elif [[ "${EVENT_NAME}" == "issue_comment" ]]; then
+            USER_REQUEST=$(echo "${EVENT_PAYLOAD}" | jq -r .comment.body)
+            ISSUE_NUMBER=$(echo "${EVENT_PAYLOAD}" | jq -r .issue.number)
+            if [[ $(echo "${EVENT_PAYLOAD}" | jq -r .issue.pull_request) != "null" ]]; then
+              IS_PR="true"
+            fi
+          elif [[ "${EVENT_NAME}" == "pull_request_review" ]]; then
+            USER_REQUEST=$(echo "${EVENT_PAYLOAD}" | jq -r .review.body)
+            ISSUE_NUMBER=$(echo "${EVENT_PAYLOAD}" | jq -r .pull_request.number)
+            IS_PR="true"
+          elif [[ "${EVENT_NAME}" == "pull_request_review_comment" ]]; then
+            USER_REQUEST=$(echo "${EVENT_PAYLOAD}" | jq -r .comment.body)
+            ISSUE_NUMBER=$(echo "${EVENT_PAYLOAD}" | jq -r .pull_request.number)
+            IS_PR="true"
+          fi
+
+          # Clean up user request
+          USER_REQUEST=$(echo "${USER_REQUEST}" | sed 's/.*@gemini//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+          {
+            echo "user_request=${USER_REQUEST}"
+            echo "issue_number=${ISSUE_NUMBER}"
+            echo "is_pr=${IS_PR}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # コミット用の Git ユーザー情報を設定
+      - name: 'Set up git user for commits'
+        run: |-
+          git config --global user.name 'gemini-cli[bot]'
+          git config --global user.email 'gemini-cli[bot]@users.noreply.github.com'
+
+      # PR の場合は PR ヘッドブランチをチェックアウト
+      - name: 'Checkout PR branch'
+        if: |-
+          ${{  steps.get_context.outputs.is_pr == 'true' }}
+        uses: 'actions/checkout@v4'
+        with:
+          token: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          ref: 'refs/pull/${{ steps.get_context.outputs.issue_number }}/head'
+          fetch-depth: 0
+
+      # Issue（非 PR）の場合は既定ブランチをチェックアウト
+      - name: 'Checkout main branch'
+        if: |-
+          ${{  steps.get_context.outputs.is_pr == 'false' }}
+        uses: 'actions/checkout@v4'
+        with:
+          token: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          fetch-depth: 0
+
+      # 受付メッセージを投稿
+      - name: 'Acknowledge request'
+        env:
+          GITHUB_ACTOR: '${{ github.actor }}'
+          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
+          REPOSITORY: '${{ github.repository }}'
+          REQUEST_TYPE: '${{ steps.get_context.outputs.request_type }}'
+        run: |-
+          set -euo pipefail
+          MESSAGE="@${GITHUB_ACTOR} I've received your request and I'm working on it now! 🤖"
+          if [[ -n "${MESSAGE}" ]]; then
+            gh issue comment "${ISSUE_NUMBER}" \
+              --body "${MESSAGE}" \
+              --repo "${REPOSITORY}"
+          fi
+
+      # Issue/PR の本文を取得
+      - name: 'Get description'
+        id: 'get_description'
+        env:
+          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          IS_PR: '${{ steps.get_context.outputs.is_pr }}'
+          ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
+        run: |-
+          set -euo pipefail
+          if [[ "${IS_PR}" == "true" ]]; then
+            DESCRIPTION=$(gh pr view "${ISSUE_NUMBER}" --json body --template '{{.body}}')
+          else
+            DESCRIPTION=$(gh issue view "${ISSUE_NUMBER}" --json body --template '{{.body}}')
+          fi
+          {
+            echo "description<<EOF"
+            echo "${DESCRIPTION}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      # 既存のコメント一覧を取得
+      - name: 'Get comments'
+        id: 'get_comments'
+        env:
+          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          IS_PR: '${{ steps.get_context.outputs.is_pr }}'
+          ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
+        run: |-
+          set -euo pipefail
+          if [[ "${IS_PR}" == "true" ]]; then
+            COMMENTS=$(gh pr view "${ISSUE_NUMBER}" --json comments --template '{{range .comments}}{{.author.login}}: {{.body}}{{"\n"}}{{end}}')
+          else
+            COMMENTS=$(gh issue view "${ISSUE_NUMBER}" --json comments --template '{{range .comments}}{{.author.login}}: {{.body}}{{"\n"}}{{end}}')
+          fi
+          {
+            echo "comments<<EOF"
+            echo "${COMMENTS}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Gemini CLI を実行
+      - name: 'Run Gemini'
+        id: 'run_gemini'
+        uses: 'google-github-actions/run-gemini-cli@v0'
+        env:
+          GITHUB_TOKEN: '${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}'
+          REPOSITORY: '${{ github.repository }}'
+          USER_REQUEST: '${{ steps.get_context.outputs.user_request }}'
+          ISSUE_NUMBER: '${{ steps.get_context.outputs.issue_number }}'
+          IS_PR: '${{ steps.get_context.outputs.is_pr }}'
+        with:
+          gemini_api_key: '${{ secrets.GEMINI_API_KEY }}'
+          # gcp_workload_identity_provider: '${{ vars.GCP_WIF_PROVIDER }}'
+          # gcp_project_id: '${{ vars.GOOGLE_CLOUD_PROJECT }}'
+          # gcp_location: '${{ vars.GOOGLE_CLOUD_LOCATION }}'
+          # gcp_service_account: '${{ vars.SERVICE_ACCOUNT_EMAIL }}'
+          # use_vertex_ai: '${{ vars.GOOGLE_GENAI_USE_VERTEXAI }}'
+          # use_gemini_code_assist: '${{ vars.GOOGLE_GENAI_USE_GCA }}'
+          settings: |-
+            {
+              "maxSessionTurns": 50,
+              "telemetry": {
+                "enabled": false,
+                "target": "gcp"
+              }
+            }
+          prompt: |-
+            ## 役割
+
+            あなたは GitHub ワークフロー内の CLI インターフェース経由で呼び出される支援的な AI アシスタントです。リポジトリと対話し、ユーザーに応答するための各種ツールにアクセスできます。
+
+            ## コンテキスト
+
+            - リポジトリ: `${{ github.repository }}`
+            - トリガーイベント: `${{ github.event_name }}`
+            - Issue/PR 番号: `${{ steps.get_context.outputs.issue_number }}`
+            - これは PR か: `${{ steps.get_context.outputs.is_pr }}`
+            - Issue/PR の本文:
+            `${{ steps.get_description.outputs.description }}`
+            - コメント一覧:
+            `${{ steps.get_comments.outputs.comments }}`
+
+            ## ユーザーからのリクエスト
+
+            ユーザーからのリクエストは次のとおりです:
+            `${{ steps.get_context.outputs.user_request }}`
+
+            ## Issue・PR コメント・質問への対応方針
+
+            このワークフローは主に次の 3 つのシナリオをサポートします。
+
+            1. Issue の修正を作成する
+               - ユーザーのリクエストと関連する Issue/PR の本文を丁寧に読みます。
+               - 利用可能なツールで関連コンテキストを収集します（例: `gh issue view`, `gh pr view`, `gh pr diff`, `cat`, `head`, `tail`）。
+               - 実装に進む前に、問題の根本原因を特定します。
+               - チェックリストとして「計画」を作成・維持します:
+                 - 最初に、対応に必要な手順をチェックリスト（`- [ ] Task` 形式）で Issue/PR にコメント投稿します。
+                 - 例:
+                   ```
+                   ### 計画
+                   - [ ] 根本原因を調査する
+                   - [ ] `file.py` に修正を実装する
+                   - [ ] テストを追加/変更する
+                   - [ ] ドキュメントを更新する
+                   - [ ] 修正を検証して Issue をクローズする
+                   ```
+                 - 初回投稿: `gh pr comment "${ISSUE_NUMBER}" --body "<plan>"` または `gh issue comment "${ISSUE_NUMBER}" --body "<plan>"`
+                 - 進捗に応じて同じコメントを編集して最新状態を保ちます（完了は `- [x]`）。
+                   - 更新手順:
+                     1. チェックリストコメントの ID を取得（`gh pr comment list "${ISSUE_NUMBER}"` または `gh issue comment list "${ISSUE_NUMBER}"`）。
+                     2. 取得した ID のコメント本文を更新:
+                        - PR の場合: `gh pr comment --edit <comment-id> --body "<updated plan>"`
+                        - Issue の場合: `gh issue comment --edit <comment-id> --body "<updated plan>"`
+                     3. チェックリストは Issue/PR のコメントとしてのみ維持し、コードファイル内で追跡・更新しないこと。
+               - コード修正が必要な場合は、影響ファイルや該当箇所を特定します。不明点があればユーザーへの質問も整理します。
+               - 利用可能なツール（例: `write_file`）でコード/ドキュメントを変更します。プロジェクトの規約とベストプラクティスに従い、シェル変数参照は誤動作防止のため常に `"${VAR}"` 形式で書きます。
+               - 関連テストやチェックを実行して意図通り動くことを検証し、可能であれば証拠（テスト出力、スクリーンショット等）を示します。
+               - ブランチ運用とコミット:
+                 - `main` ブランチへ直接コミット「しない」でください。
+                 - PR 対応（`IS_PR` が `true`）では、正しいブランチが既にチェックアウト済みです。単にコミットしてプッシュします。
+                   - `git add .`
+                   - `git commit -m "feat: <describe the change>"`
+                   - `git push`
+                 - Issue 対応（`IS_PR` が `false`）では、新しいブランチを作成します。例: `issue/${ISSUE_NUMBER}/<short-description>`
+                   - `git checkout -b issue/${ISSUE_NUMBER}/my-fix`
+                   - `git add .`
+                   - `git commit -m "feat: <describe the fix>"`
+                   - `git push origin issue/${ISSUE_NUMBER}/my-fix`
+                   - プッシュ後、次で PR を作成できます: `gh pr create --title "Fixes #${ISSUE_NUMBER}: <short title>" --body "This PR addresses issue #${ISSUE_NUMBER}."`
+               - 変更内容と理由の要約を Markdown にまとめます: `write_file("response.md", "<your response here>")`
+               - まとめをコメントとして投稿:
+                 - PR: `gh pr comment "${ISSUE_NUMBER}" --body-file response.md`
+                 - Issue: `gh issue comment "${ISSUE_NUMBER}" --body-file response.md`
+
+            2. PR 上のコメントへの対応
+               - 対象コメントと PR の文脈を読みます。
+               - `gh pr view`, `gh pr diff`, `cat` などでコードと議論の流れを把握します。
+               - 変更や説明を求めるコメントなら、Issue 修正時と同様に計画チェックリスト→実装→テスト→コミットの流れで対応し、チェックリストを更新します。
+               - コミット:
+                 - 正しい PR ブランチがチェックアウト済みです。変更を追加・コミット・プッシュします。
+                 - `git add .`
+                 - `git commit -m "fix: address review comments"`
+                 - `git push`
+               - 質問であれば、必要に応じてコードやドキュメントを引用しつつ、簡潔かつ明確に回答します。
+               - 回答は `response.md` に記述し、PR コメントとして投稿: `gh pr comment "${ISSUE_NUMBER}" --body-file response.md`
+
+            3. Issue 上の質問に回答する
+               - `gh issue view` などで質問と Issue の文脈を把握します。
+               - 必要に応じてリポジトリを調査・分析し、正確な回答を用意します。
+               - コード/ドキュメント修正が必要な場合は、上記の修正プロセス（チェックリスト作成と更新を含む）に従い、**セクション1のとおり新しいブランチを作成** します。
+               - 明確で簡潔な回答を `response.md` にまとめ、Issue コメントとして投稿: `gh issue comment "${ISSUE_NUMBER}" --body-file response.md`
+
+            ## ガイドライン
+
+            - 簡潔で実行可能な指示・変更を心がけ、ユーザーの課題を効率的に解決します。
+            - コードやドキュメントを変更した場合は、必ずコミットしてプッシュします。
+            - 解決や回答に不確実性がある場合は、推論を説明しつつ、必要な確認質問を行います。
+            - プロジェクトの規約とベストプラクティスに従います。
+            - コメント等は必ず日本語でアウトプットを行います。
